@@ -5,44 +5,44 @@ import { clamp } from "../game/math";
 import type { Session } from "../game/session";
 import type { CameraMode, PadState, Quality } from "../game/types";
 import { CarModel } from "./car";
-import { buildChunk, CHUNK, fillRing, type Plant, ringIndex } from "./world";
+import {
+  broadleafGeometry,
+  crystalGeometry,
+  grassGeometry,
+  palmGeometry,
+  pineGeometry,
+  rockGeometry,
+} from "./foliage";
+import {
+  createFoliageMaterial,
+  createGrassMaterial,
+  createGroundMaterial,
+  createLook,
+  createRoadMaterial,
+  createSkyMaterial,
+  createWaterMaterial,
+} from "./shade";
+import {
+  buildChunk,
+  CHUNK,
+  fillRing,
+  type Plant,
+  RING_BANDS,
+  RING_SEGMENTS,
+  ringIndex,
+} from "./world";
 
 const PIXEL: Record<Quality, number> = { low: 0.75, medium: 1, high: 1.35 };
 const FOG: Record<Quality, number> = { low: 220, medium: 360, high: 560 };
-
-const skyVertex = `
-  varying vec3 vDir;
-  void main() {
-    vec4 world = modelMatrix * vec4(position, 1.0);
-    vDir = world.xyz;
-    gl_Position = projectionMatrix * viewMatrix * world;
-  }
-`;
-
-const skyFragment = `
-  varying vec3 vDir;
-  uniform vec3 zenith;
-  uniform vec3 horizon;
-  uniform vec3 sunDir;
-  uniform vec3 sunColor;
-  uniform float night;
-  void main() {
-    vec3 dir = normalize(vDir);
-    float height = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 color = mix(horizon, zenith, pow(height, 0.65));
-    float sun = pow(max(dot(dir, normalize(sunDir)), 0.0), 90.0);
-    color += sunColor * sun;
-    color += vec3(0.55, 0.65, 1.0) * night * pow(max(dir.y, 0.0), 0.4) * 0.15;
-    gl_FragColor = vec4(color, 1.0);
-  }
-`;
 
 type Chunk = {
   id: number;
   road: THREE.Mesh;
   ground: THREE.Mesh;
-  plants: THREE.InstancedMesh | null;
+  trees: THREE.InstancedMesh | null;
+  leaves: THREE.InstancedMesh | null;
   rocks: THREE.InstancedMesh | null;
+  grass: THREE.InstancedMesh | null;
 };
 
 const dead = (value: number): number => (Math.abs(value) < 0.14 ? 0 : value);
@@ -110,25 +110,21 @@ export class View {
   private readonly sun = new THREE.DirectionalLight("#fff4dd", 2.4);
   private readonly hemi = new THREE.HemisphereLight("#c5def8", "#6d7a4e", 0.85);
   private readonly sky: THREE.Mesh;
-  private readonly skyUniforms = {
-    zenith: { value: new THREE.Color("#7eb6ef") },
-    horizon: { value: new THREE.Color("#d5ecff") },
-    sunDir: { value: new THREE.Vector3(0.2, 0.8, 0.3) },
-    sunColor: { value: new THREE.Color("#fff4dd") },
-    night: { value: 0 },
-  };
+  private readonly surface = createLook();
   private readonly car = new CarModel();
-  private readonly roadMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
-  private readonly groundMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
-  private readonly pine: THREE.BufferGeometry;
-  private readonly palm: THREE.BufferGeometry;
-  private readonly crystal: THREE.BufferGeometry;
-  private readonly rock: THREE.BufferGeometry;
-  private readonly plantMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
-  private readonly rockMaterial = new THREE.MeshLambertMaterial({ vertexColors: true });
+  private readonly roadMaterial: THREE.ShaderMaterial;
+  private readonly groundMaterial: THREE.ShaderMaterial;
+  private readonly foliageMaterial: THREE.ShaderMaterial;
+  private readonly grassMaterial: THREE.ShaderMaterial;
+  private readonly pine = pineGeometry();
+  private readonly broadleaf = broadleafGeometry();
+  private readonly palm = palmGeometry();
+  private readonly crystal = crystalGeometry();
+  private readonly rock = rockGeometry();
+  private readonly grass = grassGeometry();
   private readonly ring: THREE.Mesh;
   private readonly ringPositions: Float32Array;
-  private readonly ringColors: Float32Array;
+  private readonly ringInfo: Float32Array;
   private readonly water: THREE.Mesh;
   private readonly precip: THREE.Points;
   private readonly precipPositions: Float32Array;
@@ -161,41 +157,30 @@ export class View {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.setClearColor("#87a8c9");
+    this.roadMaterial = createRoadMaterial(this.surface);
+    this.groundMaterial = createGroundMaterial(this.surface);
+    this.foliageMaterial = createFoliageMaterial(this.surface);
+    this.grassMaterial = createGrassMaterial(this.surface);
     this.scene.add(this.hemi, this.sun, this.sun.target, this.car.root);
     this.sky = new THREE.Mesh(
-      new THREE.SphereGeometry(900, 24, 16),
-      new THREE.ShaderMaterial({
-        uniforms: this.skyUniforms,
-        vertexShader: skyVertex,
-        fragmentShader: skyFragment,
-        side: THREE.BackSide,
-        depthWrite: false,
-      }),
+      new THREE.SphereGeometry(1400, 32, 20),
+      createSkyMaterial(this.surface),
     );
     this.sky.frustumCulled = false;
     this.scene.add(this.sky);
-    this.pine = pineGeometry();
-    this.palm = palmGeometry();
-    this.crystal = new THREE.OctahedronGeometry(0.7, 0);
-    this.rock = new THREE.DodecahedronGeometry(0.55, 0);
-    this.ringPositions = new Float32Array(81 * 2 * 3);
-    this.ringColors = new Float32Array(81 * 2 * 3);
+    const ringCount = (RING_SEGMENTS + 1) * RING_BANDS;
+    this.ringPositions = new Float32Array(ringCount * 3);
+    this.ringInfo = new Float32Array(ringCount * 2);
     const ringGeometry = new THREE.BufferGeometry();
     ringGeometry.setAttribute("position", new THREE.BufferAttribute(this.ringPositions, 3));
-    ringGeometry.setAttribute("color", new THREE.BufferAttribute(this.ringColors, 3));
+    ringGeometry.setAttribute("aInfo", new THREE.BufferAttribute(this.ringInfo, 2));
     ringGeometry.setIndex(ringIndex());
-    this.ring = new THREE.Mesh(ringGeometry, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    this.ring = new THREE.Mesh(ringGeometry, this.groundMaterial);
     this.ring.frustumCulled = false;
     this.scene.add(this.ring);
     this.water = new THREE.Mesh(
-      new THREE.CircleGeometry(900, 48),
-      new THREE.MeshStandardMaterial({
-        color: "#2f7f8d",
-        transparent: true,
-        opacity: 0.55,
-        roughness: 0.15,
-        metalness: 0.2,
-      }),
+      new THREE.CircleGeometry(1200, 64),
+      createWaterMaterial(this.surface),
     );
     this.water.rotation.x = -Math.PI / 2;
     this.scene.add(this.water);
@@ -218,7 +203,7 @@ export class View {
     );
     this.shadow.rotation.x = -Math.PI / 2;
     this.scene.add(this.shadow);
-    this.scene.fog = new THREE.Fog("#c5ddf5", 40, 420);
+    this.scene.fog = null;
     this.bind();
     this.resize();
     this.running = true;
@@ -377,6 +362,7 @@ export class View {
     const weather = weatherAt(hud.weatherIndex);
     const specVehicle = VEHICLES[hud.vehicle];
     this.applyWeather(weather, hud.quality);
+    this.paintScene(scene, weather, hud.lightsLit);
     this.ensureChunks(scene, weather, hud);
     this.car.sync(specVehicle, hud.color);
     this.car.update(this.session.body, specVehicle, hud.lightsLit);
@@ -409,17 +395,16 @@ export class View {
       this.ringAt = 0;
       fillRing(
         this.ringPositions,
-        this.ringColors,
+        this.ringInfo,
         scene,
         hud.seed,
-        weather,
         this.session.body.x,
         this.session.body.z,
       );
       const position = this.ring.geometry.getAttribute("position");
-      const color = this.ring.geometry.getAttribute("color");
+      const info = this.ring.geometry.getAttribute("aInfo");
       position.needsUpdate = true;
-      color.needsUpdate = true;
+      info.needsUpdate = true;
       this.ring.geometry.computeVertexNormals();
     }
     this.fall(dt, weather.precip, this.camera);
@@ -430,32 +415,46 @@ export class View {
   }
 
   private applyWeather(weather: WeatherSpec, quality: Quality): void {
-    this.skyUniforms.zenith.value.set(weather.zenith);
-    this.skyUniforms.horizon.value.set(weather.horizon);
-    this.skyUniforms.sunColor.value.set(weather.sun);
-    this.skyUniforms.night.value = weather.night ? 1 : 0;
-    const sun = this.skyUniforms.sunDir.value;
-    sun.set(0.45, Math.max(0.05, weather.sunHeight + 0.35), 0.25).normalize();
+    const sun = this.surface.sunDir.value;
+    sun.set(0.42, Math.max(0.04, weather.sunHeight + 0.28), 0.22).normalize();
+    this.surface.sunColor.value.set(weather.sun);
+    this.surface.zenith.value.set(weather.zenith);
+    this.surface.horizon.value.set(weather.horizon);
+    this.surface.fogColor.value.set(weather.fog);
+    this.surface.night.value = weather.night ? 1 : 0;
+    this.surface.snow.value = weather.snow;
+    this.surface.wet.value = weather.precip === "rain" ? 1 : weather.precip === "snow" ? 0.35 : 0;
+    const far = FOG[quality];
+    this.surface.fogNear.value = far * (weather.night ? 0.08 : 0.28);
+    this.surface.fogFar.value = far;
     this.sun.position
       .set(this.session.body.x, this.session.body.y, this.session.body.z)
       .addScaledVector(sun, 50);
     this.sun.position.y += 20;
     this.sun.target.position.set(this.session.body.x, this.session.body.y, this.session.body.z);
-    this.sun.intensity = weather.night ? 0.25 : 2.6;
+    this.sun.intensity = weather.night ? 0.18 : 2.2;
     this.sun.color.set(weather.sun);
-    this.hemi.intensity = weather.night ? 0.22 : 0.8;
+    this.hemi.intensity = weather.night ? 0.16 : 0.55;
     this.hemi.color.set(weather.zenith);
     this.hemi.groundColor.set(weather.fog);
-    const far = FOG[quality];
-    const fog = this.scene.fog;
-    if (fog instanceof THREE.Fog) {
-      fog.color.set(weather.fog);
-      fog.near = far * 0.22;
-      fog.far = far;
-    }
-    this.camera.far = Math.max(900, far * 2);
+    this.camera.far = Math.max(1400, far * 2.4);
     this.camera.updateProjectionMatrix();
     this.renderer.setClearColor(weather.fog);
+  }
+
+  private paintScene(scene: SceneSpec, weather: WeatherSpec, lights: boolean): void {
+    const grass = new THREE.Color(scene.grass);
+    this.surface.grassA.value.copy(grass).multiplyScalar(0.62);
+    this.surface.grassB.value.copy(grass).offsetHSL(0.02, 0.05, 0.08);
+    this.surface.rockColor.value.set(scene.rock);
+    this.surface.dirtColor.value.set(scene.dirt);
+    this.surface.waterColor.value.set(scene.id === "offworld" ? "#3a2a62" : "#17657a");
+    this.surface.ambient.value.set(weather.night ? "#1a2438" : "#9aafc0");
+    this.surface.head.value = lights ? 1 : 0;
+    this.surface.time.value += 0.016;
+    const body = this.session.body;
+    this.surface.carPos.value.set(body.x, body.y, body.z);
+    this.surface.carDir.value.set(Math.sin(body.heading), 0, Math.cos(body.heading));
   }
 
   private ensureChunks(
@@ -479,7 +478,7 @@ export class View {
       }
       needed.add(id);
       if (!this.chunks.has(id)) {
-        this.addChunk(id, scene, weather, hud.seed);
+        this.addChunk(id, scene, weather, hud.seed, hud.quality);
       }
     }
     for (const [id, chunk] of this.chunks) {
@@ -490,39 +489,73 @@ export class View {
     }
   }
 
-  private addChunk(id: number, scene: SceneSpec, weather: WeatherSpec, seed: number): void {
+  private addChunk(
+    id: number,
+    scene: SceneSpec,
+    weather: WeatherSpec,
+    seed: number,
+    quality: Quality,
+  ): void {
     this.session.road.extendTo((id + 1) * CHUNK + 4);
-    const built = buildChunk(this.session.road, scene, seed, weather, id * CHUNK);
+    const built = buildChunk(this.session.road, scene, seed, weather, id * CHUNK, quality);
     const road = new THREE.Mesh(built.road, this.roadMaterial);
     const ground = new THREE.Mesh(built.ground, this.groundMaterial);
-    const plantGeometry =
-      scene.tree === "palm" ? this.palm : scene.tree === "crystal" ? this.crystal : this.pine;
-    const plants =
-      scene.tree === "none"
-        ? null
-        : instances(plantGeometry, this.plantMaterial, built.plants, new THREE.Color(scene.grass));
-    const rocks = instances(this.rock, this.rockMaterial, built.rocks, new THREE.Color(scene.rock));
+    const treeGeometry =
+      scene.tree === "palm"
+        ? this.palm
+        : scene.tree === "crystal"
+          ? this.crystal
+          : scene.id === "timber"
+            ? this.broadleaf
+            : this.pine;
+    const pines =
+      scene.tree === "pine" ? built.trees.filter((plant) => plant.hue >= 0) : built.trees;
+    const leafPlants = scene.tree === "pine" ? built.trees.filter((plant) => plant.hue < 0) : [];
+    const trees = instances(treeGeometry, this.foliageMaterial, pines, new THREE.Color("#ffffff"));
+    const leaves = instances(
+      this.broadleaf,
+      this.foliageMaterial,
+      leafPlants,
+      new THREE.Color("#ffffff"),
+    );
+    const rocks = instances(
+      this.rock,
+      this.foliageMaterial,
+      built.rocks,
+      new THREE.Color(scene.rock),
+    );
+    const grass = instances(
+      this.grass,
+      this.grassMaterial,
+      built.grass,
+      new THREE.Color(scene.grass),
+    );
     this.scene.add(road, ground);
-    if (plants) {
-      this.scene.add(plants);
+    if (trees) {
+      this.scene.add(trees);
+    }
+    if (leaves) {
+      this.scene.add(leaves);
     }
     if (rocks) {
       this.scene.add(rocks);
     }
-    this.chunks.set(id, { id, road, ground, plants, rocks });
+    if (grass) {
+      this.scene.add(grass);
+    }
+    this.chunks.set(id, { id, road, ground, trees, leaves, rocks, grass });
   }
 
   private removeChunk(chunk: Chunk): void {
     this.scene.remove(chunk.road, chunk.ground);
     chunk.road.geometry.dispose();
     chunk.ground.geometry.dispose();
-    if (chunk.plants) {
-      this.scene.remove(chunk.plants);
-      chunk.plants.dispose();
-    }
-    if (chunk.rocks) {
-      this.scene.remove(chunk.rocks);
-      chunk.rocks.dispose();
+    for (const mesh of [chunk.trees, chunk.leaves, chunk.rocks, chunk.grass]) {
+      if (!mesh) {
+        continue;
+      }
+      this.scene.remove(mesh);
+      mesh.dispose();
     }
   }
 
@@ -640,49 +673,6 @@ export class View {
     this.precip.position.y -= 4;
   }
 }
-
-const pineGeometry = (): THREE.BufferGeometry => {
-  const trunk = new THREE.CylinderGeometry(0.12, 0.18, 1.1, 6);
-  trunk.translate(0, 0.55, 0);
-  const crown = new THREE.ConeGeometry(0.85, 2.4, 7);
-  crown.translate(0, 2.1, 0);
-  return merge(trunk, crown);
-};
-
-const palmGeometry = (): THREE.BufferGeometry => {
-  const trunk = new THREE.CylinderGeometry(0.08, 0.14, 2.4, 6);
-  trunk.translate(0, 1.2, 0);
-  const crown = new THREE.SphereGeometry(0.7, 7, 5);
-  crown.scale(1.4, 0.45, 1.4);
-  crown.translate(0, 2.5, 0);
-  return merge(trunk, crown);
-};
-
-const merge = (a: THREE.BufferGeometry, b: THREE.BufferGeometry): THREE.BufferGeometry => {
-  const count = a.getAttribute("position").count + b.getAttribute("position").count;
-  const positions = new Float32Array(count * 3);
-  const normals = new Float32Array(count * 3);
-  const copy = (geometry: THREE.BufferGeometry, offset: number) => {
-    const position = geometry.getAttribute("position");
-    geometry.computeVertexNormals();
-    const normal = geometry.getAttribute("normal");
-    for (let i = 0; i < position.count; i += 1) {
-      positions[(offset + i) * 3] = position.getX(i);
-      positions[(offset + i) * 3 + 1] = position.getY(i);
-      positions[(offset + i) * 3 + 2] = position.getZ(i);
-      normals[(offset + i) * 3] = normal.getX(i);
-      normals[(offset + i) * 3 + 1] = normal.getY(i);
-      normals[(offset + i) * 3 + 2] = normal.getZ(i);
-    }
-    return position.count;
-  };
-  const first = copy(a, 0);
-  copy(b, first);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
-  return geometry;
-};
 
 class EngineAudio {
   private context: AudioContext | null = null;
