@@ -1,0 +1,11 @@
+name: Feature
+description: A change to the drive
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What should change
+    validations:
+      required: true
