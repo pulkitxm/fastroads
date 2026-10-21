@@ -14,7 +14,7 @@ The same seed, scene, and road style rebuild the same path.
 
 Each vehicle is a small set of accelerations, a wheelbase, grip, and a shape. The step integrates throttle, brake, drag, grade, and yaw. Drag is chosen so flat-road top speed matches the vehicle. Off the pavement, grip falls and drag rises. Autodrive looks ahead on the centerline and aims for a comfortable speed, or for the cruise target when one is set.
 
-The picture is a Three.js scene: one Lambert material for the road, one for the ground, instanced plants, a sky shader, and a pooled precipitation field parented near the camera. The React layer reads a snapshot about ten times a second. It does not run the physics.
+The picture is a Three.js scene. Ground, asphalt, foliage, water, and sky are shader materials: slope and noise choose grass, rock, dirt, and snow, the road keeps thin painted lines, and headlights are a beam in the shader rather than a white spotlight on the whole lane. Trees and grass cards are instanced. The React layer reads a snapshot about ten times a second. It does not run the physics.
 
 ## Persistence
 

@@ -189,18 +189,37 @@ export class CarModel {
 
   private axles(spec: VehicleSpec, dark: THREE.Material, axles: number[], single = false): void {
     const radius = spec.id === "coach" ? 0.42 : spec.wheels === 2 ? 0.34 : 0.34;
-    const geo = new THREE.CylinderGeometry(radius, radius, single ? 0.12 : 0.22, 16);
+    const geo = new THREE.CylinderGeometry(radius, radius, single ? 0.12 : 0.24, 18);
+    const rimGeo = new THREE.CylinderGeometry(
+      radius * 0.58,
+      radius * 0.58,
+      single ? 0.14 : 0.26,
+      12,
+    );
+    const silver = new THREE.MeshStandardMaterial({
+      color: "#d5d8df",
+      metalness: 0.85,
+      roughness: 0.25,
+    });
     const tracks = single ? [0] : [-spec.width * 0.56, spec.width * 0.56];
     for (const z of axles) {
       for (const x of tracks) {
         const spin = new THREE.Group();
-        spin.position.set(x, radius, z);
+        spin.position.set(x, radius * 0.92, z);
         const mesh = new THREE.Mesh(geo, dark);
+        const rim = new THREE.Mesh(rimGeo, silver);
         mesh.rotation.z = Math.PI / 2;
-        spin.add(mesh);
+        rim.rotation.z = Math.PI / 2;
+        spin.add(mesh, rim);
         this.root.add(spin);
         this.wheels.push({ spin, front: z > 0 });
       }
+    }
+    if (!single) {
+      this.box(dark, spec.width * 1.02, 0.18, 0.42, 0, radius * 0.95, spec.length * 0.3);
+      this.box(dark, spec.width * 1.02, 0.18, 0.42, 0, radius * 0.95, -spec.length * 0.32);
+      this.box(dark, 0.1, 0.08, 0.18, spec.width * 0.5, spec.height * 0.72, spec.length * 0.12);
+      this.box(dark, 0.1, 0.08, 0.18, -spec.width * 0.5, spec.height * 0.72, spec.length * 0.12);
     }
   }
 
